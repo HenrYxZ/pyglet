@@ -4,13 +4,13 @@ import threading
 from typing import Deque, Optional, TYPE_CHECKING
 import weakref
 
-from pyglet.media.drivers.base import AbstractAudioDriver, AbstractAudioPlayer, MediaEvent
+from pyglet.media.drivers.base import AbstractAudioDriver, AbstractAudioPlayer
 from pyglet.media.drivers.listener import AbstractListener
 from pyglet.media.player_worker_thread import PlayerWorkerThread
 from pyglet.util import debug_print
 
 from . import lib_pulseaudio as pa
-from .interface import PulseAudioMainloop
+from .interface import PulseAudioMainloop, SAMPLE_FORMATS
 
 if TYPE_CHECKING:
     from pyglet.media.codecs import AudioData, AudioFormat, Source
@@ -30,6 +30,10 @@ class PulseAudioDriver(AbstractAudioDriver):
         self.worker.start()
         self._players = weakref.WeakSet()
         self._listener = PulseAudioListener(self)
+
+    @property
+    def sample_formats(self):
+        return tuple(SAMPLE_FORMATS.keys())
 
     def create_audio_player(self, source: 'Source', player: 'AudioPlayer') -> 'PulseAudioPlayer':
         assert self.context is not None
@@ -212,7 +216,7 @@ class PulseAudioPlayer(AbstractAudioPlayer):
         assert _debug('PulseAudioPlayer: underflow')
         with self._audio_data_lock:
             if self._pyglet_source_exhausted and self._audio_data_buffer.available == 0:
-                MediaEvent('on_eos').sync_dispatch_to_player(self.player)
+                self.dispatch_eos()
             self._has_underrun = True
         self.stream.mainloop.signal()
 
@@ -240,10 +244,9 @@ class PulseAudioPlayer(AbstractAudioPlayer):
         if new_data is None:
             self._pyglet_source_exhausted = True
             if self._has_underrun:
-                MediaEvent('on_eos').sync_dispatch_to_player(self.player)
+                self.dispatch_eos()
         else:
             self._audio_data_buffer.add_data(new_data)
-            self.append_events(self._audio_data_buffer.virtual_write_index, new_data.events)
 
     def _write_to_stream(self, nbytes: int) -> int:
         data_ptr, bytes_accepted = self.stream.begin_write(nbytes)
@@ -284,7 +287,6 @@ class PulseAudioPlayer(AbstractAudioPlayer):
             self._maybe_write_pending()
             self._latest_timing_info = self._update_and_get_timing_info()
 
-        self.dispatch_media_events(self._get_read_index())
         with self._audio_data_lock:
             self._maybe_fill_audio_data_buffer()
         with self.driver.mainloop.lock:

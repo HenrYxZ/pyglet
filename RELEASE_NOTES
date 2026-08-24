@@ -1,3 +1,44 @@
+pyglet 2.1.16
+
+Bugfixes
+--------
+- math: Fix Mat3.scale and Mat4.translate to match Mat4 conventions. (#1460)
+- math: Fix Mat4.scale to use all values, not only diagonals. (#1463)
+- text: Route glyph placements to avoid accumulation errors. (#1450)
+- media: Backport ffmpeg fixes from pyglet 3.0. (#1459)
+
+
+pyglet 2.1.15
+
+Bugfixes
+--------
+linux.fontconfig: Fix incorrect FcFreeTypeQueryFace argument. #1454
+
+Improvements
+------------
+media: Improved support for 32bit audio, and enhanced capability detection and handling. #1415
+docs: Add missing includes for gui.Frame. #1444
+docs: Update paragraph spacing documentation.
+docs: Update details about supported Python versions. #1434
+docs: Add section on drawing VertexLists, and usage examples.
+
+
+pyglet 2.1.14
+
+Bugfixes
+--------
+shapes: Handle ZeroDivisionError and domain error when calculating miter scale (#1418)
+window: On macOS, fix RecursionError when resizing Windows. (#1421)
+text: Fix larger sized characters causing wrap issues. (#1426)
+
+Improvements
+------------
+typing: Fix the Label type hints for font_family. (#1407)
+typing: Add type hints to the Quaternion.from_mat* methods. (#1406)
+typing: Provide concrete typing for Window based on selected platform. (#1409)
+docs: Fix typo. (#1416)
+
+
 pyglet 2.1.13
 
 Bugfixes

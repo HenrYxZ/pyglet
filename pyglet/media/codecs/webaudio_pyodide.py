@@ -11,8 +11,8 @@ from .base import AudioFormat, Source, StaticSource
 _debug = pyglet.options.debug_media
 
 try:
-    import js
-    import pyodide.ffi
+    import js  # noqa: F821
+    import pyodide.ffi  # noqa: F821
 except ImportError:
     raise ImportError("Pyodide not found.")
 
@@ -80,7 +80,7 @@ class JavascriptWebAudioSource(Source):
         self.js_array = None
         self.audio_buffer = None
 
-    def get_audio_data(self, num_bytes: int, compensation_time: float = 0.0) -> NoReturn:
+    def get_audio_data(self, num_bytes: int) -> NoReturn:
         raise NotImplementedError("This is not supported and should not be called.")
 
     def seek(self, timestamp: float) -> NoReturn:
@@ -97,7 +97,7 @@ class PyodideDecoder(MediaDecoder):  # noqa: D101
         return '.mp3', '.aac', '.wav', '.ogg', '.webm'
         # possibly use audio.canPlayType?
 
-    def decode(self, filename: str, file: BinaryIO, streaming: bool = True) -> JavascriptWebAudioSource:
+    def decode(self, filename: str, file: BinaryIO, streaming: bool = True, **kwargs) -> JavascriptWebAudioSource:
         # web audio doesn't really have streaming sources, so just always return this regardless
         return JavascriptWebAudioSource(filename, file)
 

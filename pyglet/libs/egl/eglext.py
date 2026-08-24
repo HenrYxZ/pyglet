@@ -1,63 +1,43 @@
-from __future__ import annotations
 from ctypes import *
-from typing import Sequence, Callable, NoReturn
+from pyglet.libs.egl import egl
+from pyglet.libs.egl.lib import link_EGL as _link_function
+from pyglet.graphics.api.gl.lib import MissingFunctionException, missing_function
 
-import pyglet
 
-__all__ = ['link_EGL']
+EGL_PLATFORM_DEVICE_EXT = 0X313F
+EGL_PLATFORM_GBM_MESA = 0X31D7
+EGL_PLATFORM_WAYLAND = 0x31D8
 
-from pyglet.libs.egl.egl_lib import EGLenum, EGLDisplay, EGLConfig, EGLSurface, EGLBoolean, EGLint, EGLAttrib
-
-egl_lib = pyglet.lib.load_library('EGL')
-
-# Look for eglGetProcAddress
-eglGetProcAddress = getattr(egl_lib, 'eglGetProcAddress')
-eglGetProcAddress.restype = POINTER(CFUNCTYPE(None))
-eglGetProcAddress.argtypes = [POINTER(c_ubyte)]
-
-class MissingFunctionException(Exception):  # noqa: N818
-    def __init__(self, name: str, requires: str | None = None, suggestions: Sequence[str] | None=None) -> None:
-        msg = f'{name} is not exported by the available OpenGL driver.'
-        if requires:
-            msg += f'  {requires} is required for this functionality.'
-        if suggestions:
-            msg += '  Consider alternative(s) {}.'.format(', '.join(suggestions))
-        Exception.__init__(self, msg)
-
-def missing_function(name: str, requires: str | None =None, suggestions: Sequence[str] | None=None) -> Callable:
-    def MissingFunction(*_args, **_kwargs) -> NoReturn:  # noqa: ANN002, ANN003, N802
-        raise MissingFunctionException(name, requires, suggestions)
-
-    return MissingFunction
-
-def link_EGL(name, restype, argtypes, requires=None, suggestions=None):
-    try:
-        func = getattr(egl_lib, name)
-        func.restype = restype
-        func.argtypes = argtypes
-        return func
-    except AttributeError:
-        bname = cast(pointer(create_string_buffer(pyglet.util.asbytes(name))), POINTER(c_ubyte))
-        addr = eglGetProcAddress(bname)
-        if addr:
-            ftype = CFUNCTYPE(*((restype,) + tuple(argtypes)))
-            func = cast(addr, ftype)
-            return func
-
-    return missing_function(name, requires, suggestions)
-
-EGL_PLATFORM_GBM_MESA = 12759
-EGL_PLATFORM_DEVICE_EXT = 12607
 EGLDeviceEXT = POINTER(None)
 
-eglGetPlatformDisplayEXT = link_EGL('eglGetPlatformDisplayEXT', EGLDisplay, [EGLenum, POINTER(None), POINTER(
-    EGLint)], None)
-eglCreatePlatformWindowSurfaceEXT = link_EGL('eglCreatePlatformWindowSurfaceEXT', EGLSurface, [EGLDisplay, EGLConfig, POINTER(None), POINTER(
-    EGLAttrib)], None)
-eglQueryDevicesEXT = link_EGL('eglQueryDevicesEXT', EGLBoolean, [EGLint, POINTER(EGLDeviceEXT), POINTER(
-    EGLint)], None)
+eglGetPlatformDisplayEXT = _link_function('eglGetPlatformDisplayEXT', egl.EGLDisplay, [egl.EGLenum, POINTER(None), POINTER(
+    egl.EGLint)], None)
+eglCreatePlatformWindowSurfaceEXT = _link_function('eglCreatePlatformWindowSurfaceEXT', egl.EGLSurface, [egl.EGLDisplay, egl.EGLConfig, POINTER(None), POINTER(
+    egl.EGLAttrib)], None)
+eglQueryDevicesEXT = _link_function('eglQueryDevicesEXT', egl.EGLBoolean, [egl.EGLint, POINTER(EGLDeviceEXT), POINTER(
+    egl.EGLint)], None)
 
 
-__all__ = ['EGL_PLATFORM_DEVICE_EXT', 'EGL_PLATFORM_GBM_MESA',
+EGL_KHR_image = 1
+EGL_NATIVE_PIXMAP_KHR = 12464
+EGL_IMAGE_PRESERVED_KHR = 12498
+EGLImageKHR = POINTER(None)
+
+eglCreateImageKHR = _link_function(
+    'eglCreateImageKHR',
+    EGLImageKHR,
+    [egl.EGLDisplay, egl.EGLContext, egl.EGLenum, egl.EGLClientBuffer, POINTER(egl.EGLint)],
+    requires='EGL_KHR_image')
+
+eglDestroyImageKHR = _link_function(
+    'eglDestroyImageKHR',
+    egl.EGLBoolean,
+    [egl.EGLDisplay, EGLImageKHR],
+    requires='EGL_KHR_image')
+
+__all__ = ['EGL_PLATFORM_DEVICE_EXT', 'EGL_PLATFORM_GBM_MESA', 'EGL_PLATFORM_WAYLAND',
            'EGLDeviceEXT', 'eglGetPlatformDisplayEXT', 'eglCreatePlatformWindowSurfaceEXT',
-           'eglQueryDevicesEXT']
+           'eglQueryDevicesEXT',
+           'EGL_KHR_image', 'EGL_NATIVE_PIXMAP_KHR', 'EGL_IMAGE_PRESERVED_KHR',
+           'EGLImageKHR', 'eglCreateImageKHR', 'eglDestroyImageKHR',
+           'MissingFunctionException', 'missing_function']

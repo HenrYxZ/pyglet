@@ -348,13 +348,13 @@ class PyOggSource(StreamingSource):
     def _load_source(self):
         pass
 
-    def get_audio_data(self, num_bytes, compensation_time=0.0):
+    def get_audio_data(self, num_bytes):
         """Data returns as c_short_array instead of LP_c_char or c_ubyte, cast each buffer."""
         data = self._stream.get_buffer()  # Returns buffer, length or None
         if data is not None:
             buff, length = data
             buff_char_p = cast(buff, POINTER(c_char))
-            return AudioData(buff_char_p[:length], length, 1000, 1000, [])
+            return AudioData(buff_char_p[:length], length)
 
         return None
 
@@ -407,11 +407,11 @@ class PyOggVorbisSource(PyOggSource):
 
         self._duration = pyogg.vorbis.libvorbisfile.ov_time_total(byref(self._stream.vf), -1)
 
-    def get_audio_data(self, num_bytes, compensation_time=0.0):
+    def get_audio_data(self, num_bytes):
         data = self._stream.get_buffer()  # Returns buffer, length or None
 
         if data is not None:
-            return AudioData(*data, 1000, 1000, [])
+            return AudioData(*data)
 
         return None
 
@@ -449,7 +449,7 @@ class PyOggDecoder(MediaDecoder):
     def get_file_extensions(self):
         return PyOggDecoder.exts
 
-    def decode(self, filename, file, streaming=True):
+    def decode(self, filename, file, streaming=True, **kwargs):
         name, ext = os.path.splitext(filename)
         if ext in PyOggDecoder.vorbis_exts:
             source = PyOggVorbisSource

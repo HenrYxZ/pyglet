@@ -23,15 +23,18 @@ from pyglet.graphics.state import (
     ShaderUniformState,
     State,
     TextureState,
+    UniformBufferState,
+    ViewportProtocol,
     ViewportState,
     _expand_states_in_order,
 )
 if TYPE_CHECKING:
+    from pyglet.graphics.buffer import UniformBufferRegion
     from pyglet.window.camera.base import BaseCamera, CameraScissor
     from pyglet.customtypes import ScissorProtocol
     from pyglet.graphics.shader import ShaderProgram
     from pyglet.graphics.texture import Texture
-    from pyglet.graphics.vertexdomain import IndexedVertexList, VertexDomain, VertexList
+    from pyglet.graphics.vertexdomain import DomainAttributes, IndexedVertexList, VertexDomain, VertexList
 
 
 
@@ -57,9 +60,11 @@ class Group:
         def on_draw():
             batch.draw()
     """
-    states: list[State]
+    _state_names: dict[str, State]
+    _expanded_states: list[State]
     _hash: int
-    _hashable_states: tuple
+    _hashable_states: tuple[State, ...]
+    _state_cache_dirty: bool
 
     def __init__(self, order: int = 0, parent: Group | None = None) -> None:
         """Initialize a rendering group.
@@ -81,9 +86,12 @@ class Group:
         self._expanded_states = []
         self._comparisons = []
 
-        # Default hash
+        # Preserve the default hash for an unconfigured Group. Once state is
+        # added, expansion and re-hashing are deferred until the group is
+        # compared, hashed, or rendered.
         self._hashable_states = ()
         self._hash = hash((self._order, self.parent))
+        self._state_cache_dirty = False
 
         if parent and parent.has_enforced_states:
             for p_state in parent._enforced_states:  # noqa: SLF001
@@ -98,26 +106,50 @@ class Group:
         """Sets a state to be applied to the group.
 
         If the state is an enforced state, setting a new state will not update any children.
+
+        Args:
+            state:
+                State instance to apply when this group is drawn. States of
+                the same concrete type replace any previously assigned state
+                of that type. Derived state order and hashing are deferred
+                until the group is first used.
         """
+        assert not self._assigned_batches, "New states cannot be set once a group is in a batch."
         state_type = type(state)
         self._state_names[state_type.__name__] = state
-        group_states = self._state_names.values()
-        self._expanded_states = _expand_states_in_order(group_states)
         if state.enforced_state:
             self._enforced_states.append(state)
 
+        self._state_cache_dirty = True
+
+    def _ensure_state_cache(self) -> None:
+        """Build derived state data at the first point where it is required."""
+        if not self._state_cache_dirty:
+            return
+
+        group_states = self._state_names.values()
+        self._expanded_states = _expand_states_in_order(group_states)
         self._hashable_states = tuple({state for state in group_states if state.group_hash is True})
         self._hash = hash((self._order, self.parent, self._hashable_states))
+        self._state_cache_dirty = False
 
     @property
     def states(self) -> tuple[State, ...]:
         """The states that will apply to members of this group."""
         return tuple(self._state_names.values())
 
-    def add_comparison(self, value):
+    def add_comparison(self, value: Any) -> None:
+        """Adds a value to compare between groups of this type."""
         self._comparisons.append(value)
 
     def set_scissor(self, scissor_object: ScissorProtocol) -> None:
+        """Set the scissor state.
+
+        Args:
+            scissor_object:
+                Object describing the scissor rectangle to apply while this
+                group is drawn.
+        """
         self.set_state(ScissorState(scissor_object))
 
     def set_camera(self, camera: CameraScopeProtocol) -> None:
@@ -126,27 +158,93 @@ class Group:
         The camera object is applied during batch draw inside a draw context.
         If the camera/view provides an effective scissor area, a matching
         camera scissor state is attached automatically.
+
+        Args:
+            camera:
+                Camera or camera-like object that provides viewport state,
+                begins and ends its drawing scope, and may provide a scissor
+                area for this group.
         """
-        self.set_state(CameraScopeState(camera))
         if isinstance(camera, CameraScissorProviderProtocol):
             scissor = camera.get_group_scissor_area()
-            if scissor is not None:
-                self.set_state(ScissorState(scissor, owned_by_camera=True))
+        else:
+            scissor = None
 
-    def set_blend(self, blend_src: BlendFactor, blend_dst: BlendFactor, blend_op: BlendOp = BlendOp.ADD):
+        self.set_state(CameraScopeState(camera, scissor_managed=scissor is not None))
+        if scissor is not None:
+            self.set_state(ScissorState(scissor, owned_by_camera=True))
+
+    def set_blend(self, blend_src: BlendFactor, blend_dst: BlendFactor, blend_op: BlendOp = BlendOp.ADD) -> None:
+        """Set the blend state.
+
+        Args:
+            blend_src:
+                Source blend factor used for incoming fragment color values.
+            blend_dst:
+                Destination blend factor used for framebuffer color values.
+            blend_op:
+                Blend operation used to combine the source and destination
+                values. Defaults to additive blending.
+        """
         self.set_state(BlendState(blend_src, blend_dst, blend_op))
 
     def set_depth_test(self, func: CompareOp) -> None:
+        """Set the depth comparison state.
+
+        Args:
+            func:
+                Comparison operation used to decide whether a fragment passes
+                the depth test.
+        """
         self.set_state(DepthBufferComparison(func))
 
-    def set_viewport(self, x, y, width, height):
-        self.set_state(ViewportState(x, y, width, height))
+    def set_viewport(self, viewport: ViewportProtocol) -> None:
+        """Set the viewport state.
 
-    def set_shader_program(self, program: ShaderProgram):
+        Args:
+            viewport:
+                Mutable viewport provider with ``x``, ``y``, ``width``, and
+                ``height`` attributes. The current values are read whenever
+                this group state is applied.
+        """
+        if not isinstance(viewport, ViewportProtocol):
+            msg = "set_viewport expects an object with x, y, width, and height attributes."
+            raise TypeError(msg)
+
+        self.set_state(ViewportState(viewport))
+
+    def set_shader_program(self, program: ShaderProgram) -> None:
+        """Set the shader program state.
+
+        Args:
+            program:
+                Shader program to bind while this group is drawn.
+        """
         self.set_state(ShaderProgramState(program))
 
-    def set_shader_uniforms(self, program: ShaderProgram, uniforms: dict[str, Any]):
+    def set_shader_uniforms(self, program: ShaderProgram, uniforms: dict[str, Any]) -> None:
+        """Set shader uniform values.
+
+        Args:
+            program:
+                Shader program that owns the uniforms.
+            uniforms:
+                Mapping of uniform names to values to apply to the shader
+                program while this group is drawn.
+        """
         self.set_state(ShaderUniformState(program, uniforms))
+
+    def set_uniform_buffer(self, region: UniformBufferRegion, binding_index: int | None = None) -> None:
+        """Set a Uniform Buffer Object region state.
+
+        Args:
+            region:
+                A region created by ``UniformBlock.create_ubo_region``.
+            binding_index:
+                Optional binding point override. By default, the region uses
+                the binding point assigned to its source uniform block.
+        """
+        self.set_state(UniformBufferState(region, binding_index))
 
     def set_texture(self, texture: Texture, texture_unit: int=0, set_id: int=0) -> None:
         """Set the texture state.
@@ -161,6 +259,7 @@ class Group:
             set_id:
                 The set that the sampler belongs to. Only applicable in Vulkan.
         """
+        assert not self._assigned_batches, "New states cannot be set once a group is in a batch."
         self._state_names.pop(MultiTextureSamplerState.__name__, None)
         self.set_state(TextureState.from_texture(texture, texture_unit, set_id))
 
@@ -182,6 +281,7 @@ class Group:
             set_id:
                 The set that the sampler belongs to. Only applicable in Vulkan.
         """
+        assert not self._assigned_batches, "New states cannot be set once a group is in a batch."
         self._state_names.pop(TextureState.__name__, None)
         self.set_state(MultiTextureSamplerState.from_textures(program, textures, first_texture_unit, set_id))
 
@@ -205,6 +305,8 @@ class Group:
 
     @visible.setter
     def visible(self, value: bool) -> None:
+        if self._visible == value:
+            return
         self._visible = value
 
         for batch in self._assigned_batches:
@@ -230,8 +332,12 @@ class Group:
 
         :see: ``__hash__`` function, both must be implemented.
         """
-        return (self.__class__ is other.__class__ and
-                self._order == other.order and
+        if self.__class__ is not other.__class__:
+            return False
+
+        self._ensure_state_cache()
+        other._ensure_state_cache()
+        return (self._order == other.order and
                 self.parent == other.parent and
                 self._hashable_states == other._hashable_states and
                 self._comparisons == other._comparisons)
@@ -243,23 +349,32 @@ class Group:
 
         For simplicity, the hash should be a tuple containing your unique identifiers of your Group.
 
-        By default, this is (``order``, ``parent``).
+        By default, this includes ``order``, ``parent``, and all states that
+        participate in group hashing.
 
         :see: ``__eq__`` function, both must be implemented.
         """
+        self._ensure_state_cache()
         return self._hash
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(order={self._order})"
 
     def set_state_all(self, ctx: DrawContext) -> None:
-        """Calls all set states of the underlying Group."""
+        """Calls all set states of the underlying Group.
+
+        Args:
+            ctx:
+                Draw context that receives the group's state changes.
+        """
+        self._ensure_state_cache()
         for state in self._expanded_states:
             if state.sets_state:
                 state.set_state(ctx)
 
     def unset_state_all(self, ctx: DrawContext) -> None:
         """Calls all unset states of the underlying Group."""
+        self._ensure_state_cache()
         for state in self._expanded_states:
             if state.unsets_state:
                 state.unset_state(ctx)
@@ -270,6 +385,10 @@ class Group:
         Call this method if you are using a group in isolation: the
         parent groups will be called in top-down order, with this class's
         ``set`` being called last.
+
+        Args:
+            ctx:
+                Draw context that receives the parent and child state changes.
         """
         if self.parent:
             self.parent.set_state_recursive(ctx)
@@ -320,7 +439,7 @@ class BatchDrawOptions:
 
     def resolve(self, ctx: SurfaceContext) -> DrawPass:
         """Resolves the draw options to give a final DrawPass."""
-        camera = self.camera or ctx.window.default_camera
+        camera = self.camera or ctx.window.camera
         return DrawPass(
             #framebuffer=self.framebuffer or ctx.default_framebuffer,
             framebuffer=self.framebuffer,
@@ -367,6 +486,7 @@ class DrawContext(Generic[SurfaceContextT, BackendContextT]):
 
     # Keep track of current camera to prevent double applies.
     _applied_camera: CameraScopeProtocol | None = None
+    _applied_viewport: tuple[int, int, int, int] | None = None
 
     def __post_init__(self) -> None:
         if not self.camera_stack and self.draw_pass.camera is not None:
@@ -388,7 +508,7 @@ class DrawContext(Generic[SurfaceContextT, BackendContextT]):
             return self.scissor_stack[-1]
         return None
 
-    def apply_camera_scope(self, *, commit: bool = True) -> None:
+    def apply_camera_scope(self, *, commit: bool = True, apply_scissor: bool = True) -> None:
         if not self.camera_stack:
             return
         camera = self.active_camera
@@ -397,7 +517,8 @@ class DrawContext(Generic[SurfaceContextT, BackendContextT]):
         camera.begin(draw_context=self, commit=commit)
         self._applied_camera = camera
         self.apply_viewport()
-        self.apply_scissor()
+        if apply_scissor:
+            self.apply_scissor()
 
     def apply_viewport(self) -> None:
         viewport_state = self.active_viewport
@@ -410,7 +531,12 @@ class DrawContext(Generic[SurfaceContextT, BackendContextT]):
             return
 
         x, y, width, height = viewport
-        self.renderer.set_viewport(int(x), int(y), int(width), int(height))
+        resolved_viewport = int(x), int(y), int(width), int(height)
+        if resolved_viewport == self._applied_viewport:
+            return
+
+        self.renderer.set_viewport(*resolved_viewport)
+        self._applied_viewport = resolved_viewport
 
     def apply_scissor(self) -> None:
         scissor_state = self.active_scissor
@@ -592,12 +718,28 @@ class Batch:
             return False
 
         drawable_attributes = {name: attributes[name] for name in vertex_list.initial_attribs}
-        domain = self.get_domain(vertex_list.indexed, vertex_list.instanced, mode, group, drawable_attributes)
 
-        # TODO: Allow migration if we can restore original vertices somehow. Much faster.
-        # If the domain's don't match, we need to re-create the vertex list. Tell caller no match.
-        if domain != vertex_list.domain:
+        # Attribute locations may change between linked programs, but the GPU
+        # data can be copied directly when each existing attribute retains the
+        # same storage shape. ``_normalized_shader_attributes`` has already
+        # restored the source data type, normalization, and divisor.
+        if incompatible := [
+            name for name, initial in vertex_list.initial_attribs.items()
+            if initial.fmt != drawable_attributes[name].fmt
+        ]:
+            if _debug_graphics_batch:
+                warnings.warn(f"Incompatible shader attributes for update: {incompatible}")
             return False
+
+        domain = self.get_domain(
+            vertex_list.indexed, vertex_list.instanced, mode, group,
+            program.derive_domain_attributes(drawable_attributes),
+        )
+
+        if domain != vertex_list.domain:
+            vertex_list.migrate(domain, group)
+            self._draw_list_dirty = True
+            return True
 
         # Same domain, but state can still differ (for example, a different program).
         if vertex_list.group != group:
@@ -634,8 +776,10 @@ class Batch:
                 The batch to migrate to (or the current batch).
 
         """
-        attributes = vertex_list.domain.attribute_meta
-        domain = batch.get_domain(vertex_list.indexed, vertex_list.instanced, mode, group, attributes)
+        domain = batch.get_domain(
+            vertex_list.indexed, vertex_list.instanced, mode, group,
+            vertex_list.domain.domain_attributes,
+        )
 
         if domain != vertex_list.domain:
             vertex_list.migrate(domain, group)
@@ -648,7 +792,7 @@ class Batch:
 
 
     def get_domain(self, indexed: bool, instanced: bool, mode: GeometryMode, group: Group,
-                   attributes: dict[str, Any]) -> VertexDomain:
+                   domain_attributes: DomainAttributes) -> VertexDomain:
         """Get, or create, the vertex domain corresponding to the given arguments.
 
         mode is the render mode such as GL_LINES or GL_TRIANGLES
@@ -659,18 +803,24 @@ class Batch:
 
         # If instanced, ensure a separate domain, as multiple instance sources can match the key.
         # Find domain given formats, indices and mode
-        key = _DomainKey(indexed, instanced, mode, self._attributes_key(attributes))
+        key = _DomainKey(indexed, instanced, mode, domain_attributes.key)
 
         try:
             domain = self._domain_registry[key]
         except KeyError:
             # Create domain
-            domain = self._domain_class_map[(indexed, instanced)](self._context, self.initial_count, attributes)
+            domain = self._domain_class_map[(indexed, instanced)](
+                self._context, self.initial_count, domain_attributes.attributes
+            )
+            domain.domain_attributes = domain_attributes
             self._domain_registry[key] = domain
             self._draw_list_dirty = True
         return domain
 
     def _add_group(self, group: Group) -> None:
+        # Subclasses may override __hash__ for identity semantics, so hashing
+        # during dictionary insertion is not a reliable finalization boundary.
+        group._ensure_state_cache()  # noqa: SLF001
         self.group_map[group] = {}
         if group.parent is None:
             self.top_groups.append(group)
@@ -856,32 +1006,31 @@ class _BucketBatch(Batch):
             if not group.visible:
                 return draw_list
 
-            is_drawable = False
             for domain_key, domain in self._domain_registry.items():
-                if domain.is_empty or not domain.get_drawable_bucket(group):
+                if domain.is_empty:
                     self._empty_domains.add(domain_key)
                     continue
-                is_drawable = True
-                break
 
-            if not is_drawable and not self.group_children.get(group):
+                bucket = domain.get_drawable_bucket(group)
+                if bucket:
+                    draw_list.append((domain, domain_key.mode, group))
+                else:
+                    self._empty_domains.add(domain_key)
+
+            children = self.group_children.get(group, [])
+            if not draw_list and not children:
                 self._cleanup_groups(group)
                 return []
 
-            if is_drawable:
-                for domain_key, domain in self._domain_registry.items():
-                    bucket = domain.get_drawable_bucket(group)
-                    if not bucket:
-                        continue
-
-                    draw_list.append((domain, domain_key.mode, group))
-
-            children = self.group_children.get(group, [])
-            for child in sorted(children):
+            if len(children) <= 1:
+                ordered_children = children
+            else:
+                ordered_children = sorted(children)
+            for child in ordered_children:
                 if child.visible:
                     draw_list.extend(visit(child))
 
-            if children or is_drawable:
+            if draw_list:
                 return [(None, "set", group), *draw_list, (None, "unset", group)]
 
             return draw_list
@@ -915,7 +1064,8 @@ class _BucketBatch(Batch):
         active_states: dict[type, State] = {}
 
         def _next_same_type_set(idx: int, state_type: type) -> None | State:
-            for dom2, mode2, group2 in draw_list[idx + 1:]:
+            for next_idx in range(idx + 1, len(draw_list)):
+                dom2, mode2, group2 = draw_list[next_idx]
                 if dom2 is None and mode2 == "set":
                     for state in group2._expanded_states:  # noqa: SLF001
                         if type(state) is state_type:
